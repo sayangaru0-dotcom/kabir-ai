@@ -50,7 +50,7 @@ jobs:
           fi
           npx expo prebuild --platform android --clean --no-install || true
 
-      - name: Build APK with Gradle (Final Fix)
+      - name: Build APK with Gradle
         run: |
           if [ -d "artifacts/kabir-ai" ]; then
             cd artifacts/kabir-ai
@@ -58,13 +58,9 @@ jobs:
           if [ -d "android" ]; then
             cd android
             chmod +x gradlew
-            # Add extra memory flags for gradle to prevent out-of-memory or sudden stops
-            echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8" >> gradle.properties
-            ./gradlew assembleRelease -x lint -x test --no-daemon --stacktrace
+            ./gradlew assembleRelease -x lint -x test --no-daemon
           fi
 
-           
-  
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
