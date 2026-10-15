@@ -1,3 +1,4 @@
+
 name: Build Android APK
 
 on:
@@ -28,7 +29,6 @@ jobs:
       run: |
         unzip -o kabir-ai-master.zip
         cp -r kabir-ai-master/* .
-        # package.json থেকে pnpm চেক করার প্রি-ইনস্টল স্ক্রিপ্টটি চিরতরে মুছে ফেলা হচ্ছে
         node -e '
           const fs = require("fs");
           const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
@@ -38,28 +38,30 @@ jobs:
           }
         '
 
-    - name: Install Dependencies with npm
+    - name: Install Dependencies with Clean npm
       run: |
         npm install --legacy-peer-deps
 
     - name: Build APK with Script
       run: |
         chmod +x tools/build-apk.sh
-        bash tools/build-apk.sh || echo "Custom script skipped, proceeding with Gradle"
+        bash tools/build-apk.sh || echo "Custom script skipped"
 
-    - name: Build Gradle APK
+    - name: Find and Build Gradle if Exists
       run: |
-        if [ -d "android" ]; then
+        if [ -f "gradlew" ]; then
+          chmod +x gradlew
+          ./gradlew assembleDebug
+        elif [ -d "android" ]; then
           cd android
           chmod +x gradlew
           ./gradlew assembleDebug
         fi
 
-    - name: Upload APK
+    - name: Upload All APKs Found
       uses: actions/upload-artifact@v4
       with:
         name: kabir-ai-apk
         path: |
-          android/app/build/outputs/apk/debug/*.apk
           **/*.apk
-
+          !node_modules/**
