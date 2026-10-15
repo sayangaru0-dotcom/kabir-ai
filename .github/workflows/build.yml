@@ -29,17 +29,11 @@ jobs:
       run: |
         unzip -o kabir-ai-master.zip
         cp -r kabir-ai-master/* .
+        rm -rf pnpm-lock.yaml .npmrc
 
-    - name: Install pnpm
-      run: npm install -g pnpm@latest
-
-    - name: Configure pnpm & Install Dependencies
+    - name: Install Dependencies with Clean npm
       run: |
-        echo "ignore-scripts=false" > .npmrc
-        echo "only-built-dependencies=[]" >> .npmrc
-        pnpm config set ignore-scripts false
-        pnpm approve-builds --all || true
-        pnpm install --no-frozen-lockfile --unsafe-perm
+        npm install --legacy-peer-deps
 
     - name: Build APK with Script
       run: |
