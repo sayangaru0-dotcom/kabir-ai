@@ -8,9 +8,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: artifacts/kabir-ai
 
     steps:
       - name: Checkout repository
@@ -28,7 +25,7 @@ jobs:
           java-version: 17
 
       - name: Install dependencies
-        run: npm install
+        run: npm install --legacy-peer-deps
 
       - name: Expo Prebuild
         run: npx expo prebuild --platform android --clean
@@ -43,4 +40,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kabir-ai-app
-          path: artifacts/kabir-ai/android/app/build/outputs/apk/release/app-release.apk
+          path: android/app/build/outputs/apk/release/app-release.apk
