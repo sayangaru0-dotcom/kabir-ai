@@ -1,3 +1,4 @@
+
 name: Build Android APK
 
 on:
@@ -30,12 +31,15 @@ jobs:
         cp -r kabir-ai-master/* .
 
     - name: Install pnpm
-      run: npm install -g pnpm
+      run: npm install -g pnpm@latest
 
-    - name: Install Dependencies
+    - name: Configure pnpm & Install Dependencies
       run: |
+        echo "ignore-scripts=false" > .npmrc
+        echo "only-built-dependencies=[]" >> .npmrc
         pnpm config set ignore-scripts false
-        pnpm install --no-frozen-lockfile --unsafe-perm --force
+        pnpm approve-builds --all || true
+        pnpm install --no-frozen-lockfile --unsafe-perm
 
     - name: Build APK with Script
       run: |
@@ -57,4 +61,3 @@ jobs:
         path: |
           android/app/build/outputs/apk/debug/*.apk
           **/*.apk
-
