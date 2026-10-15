@@ -25,14 +25,18 @@ jobs:
           java-version: 17
 
       - name: Install dependencies
-        run: npm install --legacy-peer-deps
+        run: |
+          cd artifacts/kabir-ai
+          npm install --legacy-peer-deps
 
       - name: Expo Prebuild
-        run: npx expo prebuild --platform android --clean
+        run: |
+          cd artifacts/kabir-ai
+          npx expo prebuild --platform android --clean
 
       - name: Build Android APK
         run: |
-          cd android
+          cd artifacts/kabir-ai/android
           chmod +x gradlew
           ./gradlew assembleRelease
 
@@ -40,4 +44,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kabir-ai-app
-          path: android/app/build/outputs/apk/release/app-release.apk
+          path: artifacts/kabir-ai/android/app/build/outputs/apk/release/app-release.apk
