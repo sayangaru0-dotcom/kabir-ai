@@ -36,7 +36,7 @@ jobs:
     - name: Install Dependencies
       run: |
         pnpm config set ignore-scripts false
-        pnpm install --no-frozen-lockfile
+        pnpm install --no-frozen-lockfile --shamefully-hoist --unsafe-perm
 
     - name: Build APK with Script
       run: |
