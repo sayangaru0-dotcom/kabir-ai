@@ -1,4 +1,3 @@
-
 name: Build Android APK
 
 on:
@@ -18,7 +17,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 18
-          cache: 'npm'
 
       - name: Set up Java JDK
         uses: actions/setup-java@v4
@@ -31,11 +29,12 @@ jobs:
 
       - name: Install dependencies
         run: |
-          npm install -g npm@latest
+          cd artifacts/kabir-ai
           npm install
 
       - name: Build APK (Expo Prebuild & Gradle)
         run: |
+          cd artifacts/kabir-ai
           npx expo prebuild --platform android --clean
           cd android
           chmod +x gradlew
@@ -45,4 +44,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: app-release
-          path: android/app/build/outputs/apk/release/app-release.apk
+          path: artifacts/kabir-ai/android/app/build/outputs/apk/release/app-release.apk
+
