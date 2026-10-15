@@ -26,8 +26,8 @@ jobs:
 
       - name: Extract Project Zip and Clean Guards
         run: |
-          if [ -f kabir-ai-master.zip ]; then
-            unzip -o kabir-ai-master.zip
+          if [ -f kabir-ai-master-v2.zip ]; then
+            unzip -o kabir-ai-master-v2.zip
           fi
 
       - name: Install Dependencies with Clean npm
@@ -57,3 +57,4 @@ jobs:
             **/build/outputs/apk/**/*.apk
             **/*.apk
           if-no-files-found: warn
+
