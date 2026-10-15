@@ -11,57 +11,38 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Set up Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: 20
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: 'npm'
 
-    - name: Setup Java JDK
-      uses: actions/setup-java@v4
-      with:
-        distribution: 'zulu'
-        java-version: '17'
+      - name: Set up Java JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: 17
 
-    - name: Extract Project Zip and Clean Guards
-      run: |
-        unzip -o kabir-ai-master.zip
-        cp -r kabir-ai-master/* .
-        node -e '
-          const fs = require("fs");
-          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
-          if (pkg.scripts && pkg.scripts.preinstall) {
-            delete pkg.scripts.preinstall;
-            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2));
-          }
-        '
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
-    - name: Install Dependencies with Clean npm
-      run: |
-        npm install --legacy-peer-deps
+      - name: Install dependencies
+        run: |
+          npm install -g npm@latest
+          npm install
 
-    - name: Build APK with Script
-      run: |
-        chmod +x tools/build-apk.sh
-        bash tools/build-apk.sh || echo "Custom script skipped"
-
-    - name: Find and Build Gradle if Exists
-      run: |
-        if [ -f "gradlew" ]; then
-          chmod +x gradlew
-          ./gradlew assembleDebug
-        elif [ -d "android" ]; then
+      - name: Build APK (Expo Prebuild & Gradle)
+        run: |
+          npx expo prebuild --platform android --clean
           cd android
           chmod +x gradlew
-          ./gradlew assembleDebug
-        fi
+          ./gradlew assembleRelease
 
-    - name: Upload All APKs Found
-      uses: actions/upload-artifact@v4
-      with:
-        name: kabir-ai-apk
-        path: |
-          **/*.apk
-          !node_modules/**
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release
+          path: android/app/build/outputs/apk/release/app-release.apk
