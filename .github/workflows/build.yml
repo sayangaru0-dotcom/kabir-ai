@@ -1,57 +1,78 @@
 
-Build android apk · YML
+ 
 name: Build Android APK
- 
-# Builds a standalone, installable Android APK of Kabir AI and publishes it as a downloadable artifact.
-#   - Run it manually:  Actions tab > "Build Android APK" > Run workflow
-#   - Or push to main/master, or push a tag like v1.0.0 (a tag also attaches the APK to a GitHub Release)
-# One-time setup: Settings > Secrets and variables > Actions > Variables > New repository variable
-#   EXPO_PUBLIC_DOMAIN = your API server's host, e.g. my-api.example.com   (host only, no https://)
-#
-# If the build fails, open the run summary: the "Failure analysis" section names the stage that broke and quotes the real error.
- 
+
 on:
-  workflow_dispatch:
-    inputs:
-      api_domain:
-        description: "API host baked into the app (host only, e.g. my-api.example.com). Empty = use the EXPO_PUBLIC_DOMAIN repository variable."
-        required: false
-        default: ""
-        type: string
-      abis:
-        description: "CPU types to build, comma separated. arm64-v8a alone is fastest and uses the least memory."
-        required: false
-        default: "arm64-v8a,armeabi-v7a"
-        type: string
   push:
-    branches: [main, master]
-    tags: ["v*"]
- 
-permissions:
-  contents: read
- 
-concurrency:
-  group: build-android-apk-${{ github.ref }}
-  cancel-in-progress: true
- 
-defaults:
-  run:
-    shell: bash
- 
-env:
-  NODE_VERSION: "22"
-  PNPM_VERSION: "10"
-  JAVA_VERSION: "17"
-  CI: "true"
-  EXPO_NO_TELEMETRY: "1"
-  EXPO_NO_GIT_STATUS: "1"
- 
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
 jobs:
   build:
-    name: Build release APK
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    runs-on: ubuntu-latest
+
     steps:
-      - name: Check out repository
+      - name: Checkout repository
         uses: actions/checkout@v4
- 
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: false
+
+      - name: Setup Java JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: 17
+
+      - name: Find and Extract Zip
+        run: |
+          ZIP_FILE=$(find . -name "*.zip" | head -n 1)
+          if [ -n "$ZIP_FILE" ]; then
+            echo "Found zip: $ZIP_FILE"
+            unzip -o "$ZIP_FILE"
+          else
+            echo "No zip file found, looking for extracted folders..."
+          fi
+
+      - name: Find Project and Install
+        run: |
+          PKG_PATH=$(find . -name "package.json" -not -path "*/node_modules/*" | head -n 1)
+          if [ -z "$PKG_PATH" ]; then
+            echo "Error: package.json not found!"
+            exit 1
+          fi
+          PROJECT_DIR=$(dirname "$PKG_PATH")
+          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+          cd "$PROJECT_DIR"
+          pnpm install
+
+      - name: Build Android App
+        run: |
+          cd "$PROJECT_DIR"
+          if grep -q '@capacitor/core' package.json; then
+            pnpm cap sync android
+          fi
+          if [ -d "android" ]; then
+            cd android
+            chmod +x gradlew
+            ./gradlew assembleDebug
+          else
+            echo "Android directory not found!"
+            exit 1
+          fi
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: |
+            **/android/app/build/outputs/apk/debug/*.apk
+            **/build/outputs/apk/debug/*.apk
