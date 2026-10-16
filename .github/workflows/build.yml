@@ -1,77 +1,57 @@
+
+Build android apk · YML
 name: Build Android APK
-
+ 
+# Builds a standalone, installable Android APK of Kabir AI and publishes it as a downloadable artifact.
+#   - Run it manually:  Actions tab > "Build Android APK" > Run workflow
+#   - Or push to main/master, or push a tag like v1.0.0 (a tag also attaches the APK to a GitHub Release)
+# One-time setup: Settings > Secrets and variables > Actions > Variables > New repository variable
+#   EXPO_PUBLIC_DOMAIN = your API server's host, e.g. my-api.example.com   (host only, no https://)
+#
+# If the build fails, open the run summary: the "Failure analysis" section names the stage that broke and quotes the real error.
+ 
 on:
-  push:
-    branches: [ "main", "master" ]
   workflow_dispatch:
-
+    inputs:
+      api_domain:
+        description: "API host baked into the app (host only, e.g. my-api.example.com). Empty = use the EXPO_PUBLIC_DOMAIN repository variable."
+        required: false
+        default: ""
+        type: string
+      abis:
+        description: "CPU types to build, comma separated. arm64-v8a alone is fastest and uses the least memory."
+        required: false
+        default: "arm64-v8a,armeabi-v7a"
+        type: string
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+ 
+permissions:
+  contents: read
+ 
+concurrency:
+  group: build-android-apk-${{ github.ref }}
+  cancel-in-progress: true
+ 
+defaults:
+  run:
+    shell: bash
+ 
+env:
+  NODE_VERSION: "22"
+  PNPM_VERSION: "10"
+  JAVA_VERSION: "17"
+  CI: "true"
+  EXPO_NO_TELEMETRY: "1"
+  EXPO_NO_GIT_STATUS: "1"
+ 
 jobs:
   build:
-    runs-on: ubuntu-latest
-
+    name: Build release APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
-      - name: Checkout repository
+      - name: Check out repository
         uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
-          run_install: false
-
-      - name: Setup Java JDK
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'zulu'
-          java-version: 17
-
-      - name: Extract Project Zip
-        run: |
-          if [ -f kabir-ai-master-v3.zip ]; then
-            unzip -o kabir-ai-master-v3.zip
-          elif [ -f kabir-ai-master-v2.zip ]; then
-            unzip -o kabir-ai-master-v2.zip
-          fi
-
-      - name: Install Dependencies
-        run: |
-          if [ -d "artifacts/kabir-ai" ]; then
-            cd artifacts/kabir-ai
-          fi
-          pnpm install --no-frozen-lockfile || npm install --legacy-peer-deps
-
-      - name: Generate Android Project
-        run: |
-          if [ -d "artifacts/kabir-ai" ]; then
-            cd artifacts/kabir-ai
-          fi
-          npx expo prebuild --platform android --clean --no-install || true
-
-      - name: Build APK with Gradle
-        run: |
-          if [ -d "artifacts/kabir-ai" ]; then
-            cd artifacts/kabir-ai
-          fi
-          if [ -d "android" ]; then
-            cd android
-            chmod +x gradlew
-            echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8" >> gradle.properties
-            # Skip bundle tasks to prevent Node process exit code 1 crash on free runners
-            ./gradlew assembleRelease -x bundleReleaseJsAndAssets -x lint -x test --no-daemon
-          fi
-
-      - name: Upload APK Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: kabir-ai-app
-          path: |
-            **/build/outputs/apk/**/*.apk
-            **/*.apk
-          if-no-files-found: warn
-
-
+ 
