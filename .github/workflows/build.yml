@@ -1,4 +1,3 @@
-
 name: Build Android APK
 
 on:
@@ -62,6 +61,8 @@ jobs:
             cd android
             chmod +x gradlew
             echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8" >> gradle.properties
+            # Ensure Node path is fully accessible by Gradle subprocesses
+            export PATH=$PATH:$(node -p "path.dirname(process.execPath)")
             ./gradlew assembleRelease -x lint -x test --no-daemon
           fi
 
@@ -73,4 +74,5 @@ jobs:
             **/build/outputs/apk/**/*.apk
             **/*.apk
           if-no-files-found: warn
+
 
