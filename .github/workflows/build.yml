@@ -1,3 +1,4 @@
+
 name: Build Android APK
 
 on:
@@ -32,7 +33,9 @@ jobs:
 
       - name: Extract Project Zip
         run: |
-          if [ -f kabir-ai-master-v2.zip ]; then
+          if [ -f kabir-ai-master-v3.zip ]; then
+            unzip -o kabir-ai-master-v3.zip
+          elif [ -f kabir-ai-master-v2.zip ]; then
             unzip -o kabir-ai-master-v2.zip
           fi
 
@@ -58,6 +61,7 @@ jobs:
           if [ -d "android" ]; then
             cd android
             chmod +x gradlew
+            echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8" >> gradle.properties
             ./gradlew assembleRelease -x lint -x test --no-daemon
           fi
 
