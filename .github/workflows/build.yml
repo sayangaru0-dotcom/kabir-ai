@@ -1,13 +1,5 @@
 name: Build Android APK
 
-# Builds a standalone, installable Android APK of Kabir AI and publishes it as a downloadable artifact.
-#   - Run it manually:  Actions tab > "Build Android APK" > Run workflow
-#   - Or push to main/master, or push a tag like v1.0.0 (a tag also attaches the APK to a GitHub Release)
-# One-time setup: Settings > Secrets and variables > Actions > Variables > New repository variable
-#   EXPO_PUBLIC_DOMAIN = your API server's host, e.g. my-api.example.com   (host only, no https://)
-#
-# If the build fails, open the run summary: the "Failure analysis" section names the stage that broke and quotes the real error.
-
 on:
   workflow_dispatch:
     inputs:
