@@ -1,78 +1,593 @@
-
- 
 name: Build Android APK
 
+# Builds a standalone, installable Android APK of Kabir AI and publishes it as a downloadable artifact.
+#   - Run it manually:  Actions tab > "Build Android APK" > Run workflow
+#   - Or push to main/master, or push a tag like v1.0.0 (a tag also attaches the APK to a GitHub Release)
+# One-time setup: Settings > Secrets and variables > Actions > Variables > New repository variable
+#   EXPO_PUBLIC_DOMAIN = your API server's host, e.g. my-api.example.com   (host only, no https://)
+#
+# If the build fails, open the run summary: the "Failure analysis" section names the stage that broke and quotes the real error.
+
 on:
-  push:
-    branches: [ "main", "master" ]
   workflow_dispatch:
+    inputs:
+      api_domain:
+        description: "API host baked into the app (host only, e.g. my-api.example.com). Empty = use the EXPO_PUBLIC_DOMAIN repository variable."
+        required: false
+        default: ""
+        type: string
+      abis:
+        description: "CPU types to build, comma separated. arm64-v8a alone is fastest and uses the least memory."
+        required: false
+        default: "arm64-v8a,armeabi-v7a"
+        type: string
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  NODE_VERSION: "22"
+  PNPM_VERSION: "10"
+  JAVA_VERSION: "17"
+  CI: "true"
+  EXPO_NO_TELEMETRY: "1"
+  EXPO_NO_GIT_STATUS: "1"
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-
+    name: Build release APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
-      - name: Checkout repository
+      - name: Check out repository
         uses: actions/checkout@v4
+
+      # The project may sit at the repository root, inside a folder (for example a ZIP uploaded as "kabir-ai-master/"),
+      # or may still be inside a committed .zip file. Find it instead of assuming a path.
+      - name: Locate the project
+        id: loc
+        run: |
+          set -euo pipefail
+          find_ws() {
+            find . -maxdepth 5 -type f -name pnpm-workspace.yaml -not -path '*/node_modules/*' -print \
+              | awk -F/ '{ print NF "\t" $0 }' | sort -n | head -n 1 | cut -f2- || true
+          }
+          WS="$(find_ws)"
+          if [ -z "$WS" ]; then
+            ZIP=""
+            while IFS= read -r z; do
+              # grep must read ALL of unzip's output: with `grep -q` + pipefail, an early exit can SIGPIPE unzip and flip the result at random.
+              if unzip -l "$z" 2>/dev/null | grep 'pnpm-workspace.yaml' > /dev/null; then ZIP="$z"; break; fi
+            done < <(find . -maxdepth 4 -type f -iname '*.zip' -not -path '*/node_modules/*' -print 2>/dev/null | sort)
+            if [ -n "$ZIP" ]; then
+              echo "::notice title=Project is inside a ZIP::Extracting $ZIP"
+              mkdir -p _extracted
+              unzip -q -o "$ZIP" -d _extracted
+              WS="$(find_ws)"
+            fi
+          fi
+          if [ -z "$WS" ]; then
+            echo "::error title=Project not found::pnpm-workspace.yaml was not found (searched 5 folder levels and any .zip files). Upload the project so that pnpm-workspace.yaml and the artifacts/ folder are inside the repository."
+            echo "Repository top level:"; ls -la
+            exit 1
+          fi
+          ROOT="$(cd "$(dirname "$WS")" && pwd)"
+          APP="$ROOT/artifacts/kabir-ai"
+          if [ ! -f "$APP/package.json" ]; then
+            echo "::error title=App not found::Expected $APP/package.json but it does not exist."
+            echo "Contents of $ROOT:"; ls -la "$ROOT"
+            echo "Contents of $ROOT/artifacts:"; ls -la "$ROOT/artifacts" || true
+            exit 1
+          fi
+          if [ ! -f "$ROOT/pnpm-lock.yaml" ]; then
+            echo "::warning title=No lockfile::pnpm-lock.yaml was not found in $ROOT. Dependencies will be resolved fresh (slower and less reproducible)."
+          fi
+          echo "Project root: $ROOT"
+          echo "App folder:   $APP"
+          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+          echo "app=$APP" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve the API domain
+        id: dom
+        env:
+          INPUT_DOMAIN: ${{ inputs.api_domain }}
+          VAR_DOMAIN: ${{ vars.EXPO_PUBLIC_DOMAIN }}
+        run: |
+          set -euo pipefail
+          D="${INPUT_DOMAIN:-}"
+          if [ -z "$D" ]; then D="${VAR_DOMAIN:-}"; fi
+          D="$(printf '%s' "$D" | tr -d '[:space:]')"   # trim first, otherwise a leading space hides the scheme
+          D="${D#http://}"; D="${D#https://}"; D="${D%%/*}"
+          if [ -z "$D" ]; then
+            echo "::warning title=API domain not set::EXPO_PUBLIC_DOMAIN is empty. The APK will build, but the app cannot reach your server until you set the repository variable EXPO_PUBLIC_DOMAIN and run the build again."
+            D="api-domain-not-set.invalid"
+            echo "missing=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "missing=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "API domain baked into the app: $D"
+          echo "domain=$D" >> "$GITHUB_OUTPUT"
+
+      # Android builds are memory-hungry (Gradle + Kotlin compiler + Metro + C++ compilers at once). Size every limit to the
+      # actual runner (public repos get ~16 GB, private repos ~7 GB) and add swap so the Linux OOM-killer never ends the build.
+      - name: Prepare runner resources
+        id: res
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-/nonexistent}/CodeQL" 2>/dev/null || true
+          MEM_KB="$(awk '/^MemTotal:/ {print $2}' "${MEMINFO_FILE:-/proc/meminfo}")"
+          MEM_GB=$(( MEM_KB / 1048576 ))
+          CPUS="$(nproc 2>/dev/null || echo 2)"
+          if [ "$MEM_GB" -ge 14 ]; then
+            HEAP=6g; META=2g; KOTLIN=3g; NODE_HEAP=4096
+            WORKERS=$(( CPUS < 4 ? CPUS : 4 ))
+          else
+            HEAP=3g; META=1536m; KOTLIN=1536m; NODE_HEAP=3072
+            WORKERS=$(( CPUS < 2 ? CPUS : 2 ))
+          fi
+          if [ "${SKIP_SWAP:-0}" != "1" ] && sudo -n true 2>/dev/null && [ -d /mnt ]; then
+            if sudo fallocate -l 8G /mnt/kabir-swap && sudo chmod 600 /mnt/kabir-swap && sudo mkswap /mnt/kabir-swap > /dev/null && sudo swapon /mnt/kabir-swap; then
+              echo "8 GB swap enabled"
+            else
+              echo "::warning title=No swap::Could not enable swap; continuing without it."
+            fi
+          fi
+          echo "RAM: ${MEM_GB} GB, CPUs: ${CPUS} -> Gradle heap ${HEAP}, Metaspace ${META}, Kotlin daemon ${KOTLIN}, workers ${WORKERS}, Node heap ${NODE_HEAP} MB"
+          free -h || true
+          df -h / /mnt 2>/dev/null || true
+          {
+            echo "mem_gb=$MEM_GB"; echo "heap=$HEAP"; echo "meta=$META"; echo "kotlin=$KOTLIN"
+            echo "workers=$WORKERS"; echo "node_heap=$NODE_HEAP"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
-          run_install: false
+        run: |
+          set -euo pipefail
+          npm install -g "pnpm@${PNPM_VERSION}"
+          echo "pnpm $(pnpm --version), node $(node --version)"
 
-      - name: Setup Java JDK
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
-          java-version: 17
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
 
-      - name: Find and Extract Zip
+      - name: Accept Android SDK licenses
         run: |
-          ZIP_FILE=$(find . -name "*.zip" | head -n 1)
-          if [ -n "$ZIP_FILE" ]; then
-            echo "Found zip: $ZIP_FILE"
-            unzip -o "$ZIP_FILE"
-          else
-            echo "No zip file found, looking for extracted folders..."
+          echo "ANDROID_HOME=${ANDROID_HOME:-<not set>}"
+          SDKM="${ANDROID_HOME:-/usr/local/lib/android/sdk}/cmdline-tools/latest/bin/sdkmanager"
+          if [ -x "$SDKM" ]; then yes | "$SDKM" --licenses > /dev/null 2>&1 || true; else echo "sdkmanager not found; relying on the runner's pre-accepted licenses"; fi
+
+      - name: Find pnpm store
+        id: store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      # actions/cache never fails the build: a missing lockfile just produces a generic key.
+      - name: Cache pnpm packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.store.outputs.path }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-${{ runner.os }}-
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml', '**/app.json') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Install JavaScript dependencies
+        env:
+          ROOT: ${{ steps.loc.outputs.root }}
+        run: |
+          set -euo pipefail
+          cd "$ROOT"
+          if ! pnpm install --frozen-lockfile --filter "./artifacts/kabir-ai..."; then
+            echo "::warning title=Lockfile out of date::pnpm-lock.yaml does not match package.json (or is missing). Falling back to a regular install."
+            pnpm install --no-frozen-lockfile --filter "./artifacts/kabir-ai..."
           fi
 
-      - name: Find Project and Install
+      - name: Generate the Android project (expo prebuild)
+        env:
+          APP: ${{ steps.loc.outputs.app }}
+          EXPO_PUBLIC_DOMAIN: ${{ steps.dom.outputs.domain }}
         run: |
-          PKG_PATH=$(find . -name "package.json" -not -path "*/node_modules/*" | head -n 1)
-          if [ -z "$PKG_PATH" ]; then
-            echo "Error: package.json not found!"
+          set -euo pipefail
+          cd "$APP"
+          pnpm exec expo prebuild --platform android --clean --no-install
+          test -f android/gradlew || { echo "::error title=Prebuild failed::android/gradlew was not generated"; ls -la android || true; exit 1; }
+          chmod +x android/gradlew
+
+      # Prints what Expo actually generated, so a failing build can be compared against the real configuration.
+      - name: Show the generated Android configuration
+        env:
+          APP: ${{ steps.loc.outputs.app }}
+        run: |
+          set +e
+          A="$APP/android"
+          OUT="$GITHUB_WORKSPACE/android-config.txt"
+          {
+            echo "=== gradle/wrapper/gradle-wrapper.properties ==="; cat "$A/gradle/wrapper/gradle-wrapper.properties"
+            echo; echo "=== gradle.properties (as generated) ==="; cat "$A/gradle.properties"
+            echo; echo "=== versions in build.gradle ==="; grep -nE "compileSdk|minSdk|targetSdk|buildTools|ndkVersion|kotlinVersion|kotlin-gradle|com.android.tools.build|expo-root-project|react-native-gradle|ext\\." "$A/build.gradle" | head -40
+            echo; echo "=== app/build.gradle: signing / minify ==="; grep -nE "signingConfig|minifyEnabled|shrinkResources|enableProguard|enableMinify|buildTypes|keystore" "$A/app/build.gradle" | head -30
+            echo; echo "=== settings.gradle ==="; sed -n '1,60p' "$A/settings.gradle"
+            echo; echo "=== local module present ==="; ls -la "$APP/modules/kabir-screen-agent/android" 2>&1 | head
+            echo; echo "=== AndroidManifest.xml (app) ==="; sed -n '1,60p' "$A/app/src/main/AndroidManifest.xml"
+          } > "$OUT" 2>&1
+          cat "$OUT"
+          exit 0
+
+      # Bundles the JavaScript on its own first. A bad import or syntax error then shows up here in about two minutes, with
+      # Metro's own message, instead of deep inside a 20-minute Gradle run. Not fatal: Gradle bundles again by itself.
+      - name: Pre-check - bundle the JavaScript
+        id: jscheck
+        continue-on-error: true
+        env:
+          APP: ${{ steps.loc.outputs.app }}
+          EXPO_PUBLIC_DOMAIN: ${{ steps.dom.outputs.domain }}
+          NODE_OPTIONS: --max-old-space-size=${{ steps.res.outputs.node_heap }}
+        run: |
+          set -euo pipefail
+          cd "$APP"
+          pnpm exec expo export --platform android --output-dir "$RUNNER_TEMP/js-export" 2>&1 | tee "$GITHUB_WORKSPACE/js-bundle.log"
+
+      - name: Configure Gradle
+        env:
+          APP: ${{ steps.loc.outputs.app }}
+          INPUT_ABIS: ${{ inputs.abis }}
+          GRADLE_HEAP: ${{ steps.res.outputs.heap }}
+          GRADLE_META: ${{ steps.res.outputs.meta }}
+          KOTLIN_HEAP: ${{ steps.res.outputs.kotlin }}
+          WORKERS: ${{ steps.res.outputs.workers }}
+        run: |
+          set -euo pipefail
+          ABIS="${INPUT_ABIS:-arm64-v8a,armeabi-v7a}"
+          PROPS="$APP/android/gradle.properties"
+
+          # Helper shared with the build step (which may re-apply a smaller profile on retry).
+          cat > "$RUNNER_TEMP/kabir-gradle-props.sh" <<'HELPER'
+          apply_gradle_props() {
+            # usage: apply_gradle_props HEAP METASPACE KOTLIN_HEAP WORKERS PARALLEL ABIS PROPS_FILE
+            local heap="$1" meta="$2" kheap="$3" workers="$4" parallel="$5" abis="$6" props="$7"
+            touch "$props"
+            grep -v -E '^(org\.gradle\.jvmargs|kotlin\.daemon\.jvmargs|org\.gradle\.daemon|org\.gradle\.parallel|org\.gradle\.workers\.max|org\.gradle\.vfs\.watch|org\.gradle\.caching|kotlin\.incremental|reactNativeArchitectures|systemProp\.org\.gradle\.internal\.http\.(connection|socket)Timeout|systemProp\.org\.gradle\.internal\.repository\.(max\.retries|initial\.backoff))=' "$props" > "$props.tmp" || true
+            mv "$props.tmp" "$props"
+            {
+              echo ""
+              echo "# --- set by CI ---"
+              echo "org.gradle.jvmargs=-Xmx${heap} -XX:MaxMetaspaceSize=${meta} -XX:+UseParallelGC -Dfile.encoding=UTF-8"
+              echo "kotlin.daemon.jvmargs=-Xmx${kheap} -XX:MaxMetaspaceSize=${meta}"
+              echo "kotlin.incremental=false"
+              echo "org.gradle.daemon=false"
+              echo "org.gradle.parallel=${parallel}"
+              echo "org.gradle.workers.max=${workers}"
+              echo "org.gradle.vfs.watch=false"
+              echo "org.gradle.caching=false"
+              echo "reactNativeArchitectures=${abis}"
+              echo "systemProp.org.gradle.internal.http.connectionTimeout=120000"
+              echo "systemProp.org.gradle.internal.http.socketTimeout=120000"
+              echo "systemProp.org.gradle.internal.repository.max.retries=6"
+              echo "systemProp.org.gradle.internal.repository.initial.backoff=1000"
+            } >> "$props"
+          }
+          HELPER
+          # shellcheck disable=SC1090
+          source "$RUNNER_TEMP/kabir-gradle-props.sh"
+          apply_gradle_props "$GRADLE_HEAP" "$GRADLE_META" "$KOTLIN_HEAP" "$WORKERS" true "$ABIS" "$PROPS"
+
+          # Lint is not needed to produce an APK and can fail a release build.
+          mkdir -p "$HOME/.gradle/init.d"
+          cat > "$HOME/.gradle/init.d/ci-disable-lint.gradle" <<'EOF'
+          allprojects {
+            tasks.configureEach { t ->
+              if (t.name == "lint" || t.name.startsWith("lintVital") || t.name.startsWith("lintAnalyze")) { t.enabled = false }
+            }
+          }
+          EOF
+          echo "Building for: $ABIS"
+          grep -E "^(org\.gradle|kotlin\.|reactNativeArchitectures)" "$PROPS"
+
+      - name: Build the release APK (Gradle)
+        env:
+          APP: ${{ steps.loc.outputs.app }}
+          INPUT_ABIS: ${{ inputs.abis }}
+          EXPO_PUBLIC_DOMAIN: ${{ steps.dom.outputs.domain }}
+          NODE_ENV: production
+          NODE_OPTIONS: --max-old-space-size=${{ steps.res.outputs.node_heap }}
+        run: |
+          set -euo pipefail
+          ABIS="${INPUT_ABIS:-arm64-v8a,armeabi-v7a}"
+          PROPS="$APP/android/gradle.properties"
+          LOG="$GITHUB_WORKSPACE/gradle-build.log"
+          MEMLOG="$GITHUB_WORKSPACE/mem.log"
+          : > "$LOG"; : > "$MEMLOG"
+          # shellcheck disable=SC1090
+          source "$RUNNER_TEMP/kabir-gradle-props.sh"
+
+          # Record memory every 15 s so a RAM problem is provable afterwards.
+          # The monitor writes only to $MEMLOG and is detached from the step's stdout/stderr: a background process that keeps
+          # those pipes open would make this step wait for it. On exit, stop the loop AND its in-flight `sleep`.
+          ( while true; do { date +%T; free -m | awk 'NR==2 {print "  used_mb=" $3 " available_mb=" $7}'; } >> "$MEMLOG"; sleep 15; done ) > /dev/null 2>&1 &
+          MON=$!
+          trap 'pkill -P "$MON" 2>/dev/null || true; kill "$MON" 2>/dev/null || true' EXIT
+
+          cd "$APP/android"
+          # One attempt = one single-use Gradle process (--no-daemon): nothing survives to be reused by a later attempt.
+          attempt() {
+            set +e
+            ./gradlew assembleRelease --no-daemon --console=plain --stacktrace "$@" 2>&1 | tee -a "$LOG"
+            local rc=${PIPESTATUS[0]}
+            set -e
+            return "$rc"
+          }
+
+          if attempt "-PreactNativeArchitectures=$ABIS"; then exit 0; fi
+
+          MEMORY_RE='OutOfMemoryError|Java heap space|GC overhead limit exceeded|Metaspace|Gradle daemon disappeared|daemon.{0,40}disappeared|Expiring Daemon because JVM heap space is exhausted|Daemon will be stopped at the end of the build after running out of JVM memory|Could not receive a message from the daemon|Cannot allocate memory|std::bad_alloc|signal 9|clang.*: Killed|(^|[^A-Za-z])Killed($|[^A-Za-z])|exit code 137'
+          JVM_RE='OutOfMemoryError|Java heap space|GC overhead limit exceeded|Metaspace|JVM heap space is exhausted|running out of JVM memory'
+          if ! grep -Eq "$MEMORY_RE" "$LOG"; then
+            echo "::error title=Build failed::The failure is not memory related (no out-of-memory signature in the log), so it will not be retried. See the Failure analysis below."
             exit 1
           fi
-          PROJECT_DIR=$(dirname "$PKG_PATH")
-          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
-          cd "$PROJECT_DIR"
-          pnpm install
 
-      - name: Build Android App
-        run: |
-          cd "$PROJECT_DIR"
-          if grep -q '@capacitor/core' package.json; then
-            pnpm cap sync android
-          fi
-          if [ -d "android" ]; then
-            cd android
-            chmod +x gradlew
-            ./gradlew assembleDebug
+          if grep -Eq "$JVM_RE" "$LOG"; then
+            echo "::warning title=Java memory exhausted::Retrying once with a larger heap, one CPU type and no parallelism."
+            R_HEAP=5g; R_META=2g; R_KOTLIN=2g
           else
-            echo "Android directory not found!"
+            echo "::warning title=Process killed (RAM)::The OS ran out of RAM. Retrying once with smaller heaps, one CPU type and no parallelism."
+            R_HEAP=2g; R_META=1g; R_KOTLIN=1g
+          fi
+          ./gradlew --stop > /dev/null 2>&1 || true
+          free -m || true
+          apply_gradle_props "$R_HEAP" "$R_META" "$R_KOTLIN" 1 false "arm64-v8a" "$PROPS"
+          echo "=== RETRY: low-memory profile (heap $R_HEAP, arm64-v8a only, 1 worker) ===" | tee -a "$LOG"
+          attempt "-PreactNativeArchitectures=arm64-v8a" --no-parallel --max-workers=1
+
+      # Everything below uses absolute paths under $GITHUB_WORKSPACE, so it works wherever the project folder is.
+      - name: Collect and verify the APK
+        id: apk
+        env:
+          APP: ${{ steps.loc.outputs.app }}
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/dist-apk"
+          mkdir -p "$OUT"
+          APK="$(find "$APP/android/app/build/outputs/apk/release" -maxdepth 1 -type f -name '*.apk' 2>/dev/null | head -n 1 || true)"
+          if [ -z "$APK" ]; then
+            APK="$(find "$APP/android" -type f -path '*outputs/apk*' -name '*.apk' 2>/dev/null | head -n 1 || true)"
+          fi
+          if [ -z "$APK" ]; then
+            echo "::error title=APK not found::Gradle finished but no .apk was produced. Contents of the build output folder:"
+            find "$APP/android/app/build/outputs" -maxdepth 4 2>/dev/null | head -60 || true
             exit 1
           fi
+          echo "Found: $APK"
+          cp "$APK" "$OUT/kabir-ai-release.apk"
+          unzip -tq "$OUT/kabir-ai-release.apk" > /dev/null
 
-      - name: Upload APK Artifact
+          # An APK must be signed to install. Expo signs release builds with a debug key; verify, and sign ourselves if not.
+          BT="${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools"
+          APKSIGNER=""
+          if [ -d "$BT" ]; then APKSIGNER="$(ls -d "$BT"/*/apksigner 2>/dev/null | sort -V | tail -n 1 || true)"; fi
+          if [ -n "$APKSIGNER" ]; then
+            if "$APKSIGNER" verify "$OUT/kabir-ai-release.apk" > /dev/null 2>&1; then
+              echo "APK signature: OK"
+            else
+              echo "::warning title=Unsigned APK::The APK was not signed. Signing it with a throw-away debug key so it can be installed."
+              keytool -genkeypair -keystore "$RUNNER_TEMP/kabir-debug.jks" -storepass android -keypass android \
+                -alias kabir -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Kabir Debug,O=Kabir,C=US" > /dev/null 2>&1
+              "$APKSIGNER" sign --ks "$RUNNER_TEMP/kabir-debug.jks" --ks-pass pass:android --key-pass pass:android \
+                --out "$OUT/kabir-ai-release.signed.apk" "$OUT/kabir-ai-release.apk"
+              mv "$OUT/kabir-ai-release.signed.apk" "$OUT/kabir-ai-release.apk"
+              "$APKSIGNER" verify "$OUT/kabir-ai-release.apk" > /dev/null
+              echo "APK signature: OK (signed by CI)"
+            fi
+          else
+            echo "::warning::apksigner not found; skipping signature check"
+          fi
+
+          AAPT2=""
+          if [ -d "$BT" ]; then AAPT2="$(ls -d "$BT"/*/aapt2 2>/dev/null | sort -V | tail -n 1 || true)"; fi
+          if [ -n "$AAPT2" ]; then
+            "$AAPT2" dump badging "$OUT/kabir-ai-release.apk" 2>/dev/null | grep -E "^(package|sdkVersion|targetSdkVersion|application-label:)" || true
+          fi
+          SIZE="$(du -h "$OUT/kabir-ai-release.apk" | cut -f1)"
+          echo "size=$SIZE" >> "$GITHUB_OUTPUT"
+          ls -lh "$OUT"
+
+      - name: Upload APK
+        id: upload
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
-          path: |
-            **/android/app/build/outputs/apk/debug/*.apk
-            **/build/outputs/apk/debug/*.apk
+          name: kabir-ai-apk
+          path: dist-apk/kabir-ai-release.apk
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      # Names the stage that failed and quotes the real error. Compile errors are also shown as annotations.
+      - name: Failure analysis
+        id: why
+        if: failure()
+        env:
+          APP: ${{ steps.loc.outputs.app }}
+          JS_OUTCOME: ${{ steps.jscheck.outcome }}
+        run: |
+          set +e
+          WS="$GITHUB_WORKSPACE"
+          LOG="$WS/gradle-build.log"; JSLOG="$WS/js-bundle.log"; MEMLOG="$WS/mem.log"
+          REPORT="$WS/failure-analysis.md"; : > "$REPORT"
+          ALL="$(mktemp)"; cat "$LOG" "$JSLOG" > "$ALL" 2>/dev/null
+          add() { printf '%s\n' "$*" >> "$REPORT"; }
+          FOUND=0
+          hint() { # hint <regex> <what it means> <what to do>
+            if grep -Eq "$1" "$ALL"; then
+              FOUND=1
+              add "- **$2**  "; add "  Fix: $3"
+              echo "::error title=Likely cause::$2 | $3"
+            fi
+          }
+          add "## Failure analysis"; add ""
+          if [ ! -s "$LOG" ]; then
+            add "Gradle never started: the build failed in an earlier step. Open the red step above and read its message."
+          fi
+          hint '^e: .*\.kt|Kotlin compile|Compilation error. See log for more details' \
+               "Kotlin (native Android code) did not compile." \
+               "Send me the lines starting with 'e:' shown below."
+          hint 'Unable to resolve module|Cannot find module .*metro|Metro.*(error|failed)' \
+               "The JavaScript bundler cannot resolve an import." \
+               "Send me the 'Unable to resolve module' line (it names the file and the missing module)."
+          hint 'SyntaxError|Transform error|Hermes.*error|hermesc' \
+               "A JavaScript file has a syntax error the bundler or Hermes rejects." \
+               "Send me the SyntaxError lines."
+          hint 'Failed to install the following Android SDK packages|licen[cs]es? .*(not been accepted|have not)' \
+               "Android SDK licenses are not accepted, or an SDK package could not be installed." \
+               "Re-run; if it repeats, send me the 'Failed to install' lines."
+          hint 'Manifest merger failed' \
+               "Two AndroidManifest.xml files conflict." \
+               "Send me the 'Manifest merger failed' lines."
+          hint 'AAPT: error|aapt2.*error|resource .* not found|error: resource' \
+               "An Android resource (XML/string/drawable) is invalid or missing." \
+               "Send me the 'AAPT' lines."
+          hint 'Duplicate class|Duplicate resources|Duplicate resource' \
+               "Two libraries contain the same class or resource." \
+               "Send me the 'Duplicate class' lines."
+          hint 'More than one file was found with OS independent path' \
+               "Two libraries ship the same native file (.so)." \
+               "Send me the line; it needs a pickFirst rule."
+          hint 'CMake Error|ninja: build stopped|clang(\+\+)?: error|fatal error: .*: No such file' \
+               "The C++ part of React Native or a native library failed to build." \
+               "Send me the first 'CMake Error' / 'error:' lines."
+          hint 'No toolchains found|NDK.*(not found|did not have a source.properties)|ndk\.dir' \
+               "The Android NDK is missing or damaged." \
+               "Re-run; if it repeats, send me the NDK lines."
+          hint 'Unsupported class file major version|UnsupportedClassVersionError|requires Java [0-9]+|Java version' \
+               "Java version mismatch." \
+               "This workflow uses Java 17; make sure no other step overrides JAVA_HOME."
+          hint 'Could not resolve |Could not GET|Could not HEAD|Connection (reset|timed out)|Read timed out|Network is unreachable|Premature end of Content-Length' \
+               "A dependency download failed (network or repository outage)." \
+               "Just re-run the workflow."
+          hint "Task '.*' not found in (root )?project" \
+               "A Gradle task name is wrong." \
+               "Send me the line."
+          hint 'OutOfMemoryError|Java heap space|GC overhead limit exceeded|Metaspace|JVM heap space is exhausted' \
+               "The Java process ran out of memory (heap or class-metadata space)." \
+               "Re-run with abis = arm64-v8a. If it still fails, send me the lines."
+          hint 'Cannot allocate memory|std::bad_alloc|signal 9|clang.*: Killed|Gradle daemon disappeared|(^|[^A-Za-z])Killed($|[^A-Za-z])|exit code 137' \
+               "The operating system killed a build process because the runner ran out of RAM." \
+               "Re-run with abis = arm64-v8a (halves native compile memory)."
+          if [ "$FOUND" = 0 ] && [ -s "$LOG" ]; then
+            add "- No known pattern matched. The exact error text is below; please send it to me."
+          fi
+
+          add ""; add "### Gradle: what went wrong"; add '```'
+          awk '/\* What went wrong:/{f=1} f{print} /\* Try:/{if(f) exit}' "$LOG" 2>/dev/null | head -30 >> "$REPORT"
+          add '```'
+          add ""; add "### Failing task(s)"; add '```'
+          grep -E "Execution failed for task|> Task .* FAILED" "$LOG" 2>/dev/null | head -6 >> "$REPORT"
+          add '```'
+          if grep -Eq '^e: ' "$LOG" 2>/dev/null; then
+            add ""; add "### Kotlin errors"; add '```'
+            grep -E '^e: ' "$LOG" | head -20 >> "$REPORT"; add '```'
+          fi
+          if [ "$JS_OUTCOME" = "failure" ] || grep -Eq 'Unable to resolve|SyntaxError' "$JSLOG" 2>/dev/null; then
+            add ""; add "### JavaScript bundling (pre-check)"; add '```'
+            grep -E "Unable to resolve|SyntaxError|Error:|error:" "$JSLOG" 2>/dev/null | head -15 >> "$REPORT"; add '```'
+          fi
+          if [ -s "$MEMLOG" ]; then
+            add ""; add "### Memory during the build (last samples)"; add '```'
+            tail -n 8 "$MEMLOG" >> "$REPORT"
+            if sudo -n true 2>/dev/null; then sudo dmesg 2>/dev/null | grep -iE "out of memory|killed process" | tail -3 >> "$REPORT"; fi
+            add '```'
+          fi
+
+          grep -E '^e: |FAILURE:|What went wrong|Execution failed' "$LOG" 2>/dev/null | head -25 | while IFS= read -r l; do echo "::error::$l"; done
+          cat "$REPORT"
+          cat "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+
+          # Gather files worth attaching.
+          D="$WS/diagnostics"; mkdir -p "$D"
+          for f in gradle-build.log js-bundle.log mem.log android-config.txt failure-analysis.md; do [ -f "$WS/$f" ] && cp "$WS/$f" "$D/"; done
+          find "$APP/android" -maxdepth 4 \( -name 'hs_err_pid*.log' -o -path '*reports/problems/problems-report.html' \) -type f 2>/dev/null | head -5 | while IFS= read -r f; do cp "$f" "$D/" 2>/dev/null; done
+          exit 0
+
+      - name: Upload diagnostics (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics
+          path: diagnostics/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Write run summary
+        if: always()
+        env:
+          OUTCOME: ${{ steps.upload.outcome }}
+          SIZE: ${{ steps.apk.outputs.size }}
+          DOMAIN: ${{ steps.dom.outputs.domain }}
+          MISSING: ${{ steps.dom.outputs.missing }}
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            if [ "$OUTCOME" = "success" ]; then
+              echo "## APK built"
+              echo ""
+              echo "- **Download:** ${ARTIFACT_URL:-$RUN_URL} (artifact **kabir-ai-apk**, also listed at the bottom of this page)"
+              echo "- **Size:** ${SIZE:-unknown}"
+              echo "- **API host inside the app:** \`${DOMAIN}\`"
+              if [ "$MISSING" = "true" ]; then
+                echo ""
+                echo "> **API domain was not set.** Add the repository variable \`EXPO_PUBLIC_DOMAIN\` (Settings > Secrets and variables > Actions > Variables) and run again, or the app cannot reach your server."
+              fi
+              echo ""
+              echo "Install: download the artifact, unzip it, copy \`kabir-ai-release.apk\` to your phone and open it (allow installs from this source)."
+            else
+              echo "## Build did not produce an APK"
+              echo ""
+              echo "See **Failure analysis** in this summary (it names the stage that broke and quotes the real error). The full logs are attached as the **build-diagnostics** artifact."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    name: Attach APK to GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download the APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: kabir-ai-apk
+          path: release
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/kabir-ai-release.apk
+          generate_release_notes: true
