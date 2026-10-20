@@ -64,11 +64,12 @@ jobs:
         run: |
           cd "${{ env.PROJECT_DIR }}"
           
-          # Check if capacitor config exists and android folder is missing
+          # Check if android folder is missing
           if [ ! -d "android" ]; then
-            echo "Android folder missing. Attempting to add android platform..."
-            npx cap add android || true
-            pnpm cap sync android || true
+            echo "Android folder missing. Adding capacitor android platform..."
+            pnpm add -D @capacitor/android || true
+            pnpm exec cap add android || true
+            pnpm exec cap sync android || true
           fi
           
           if [ -d "android" ]; then
@@ -88,10 +89,6 @@ jobs:
             **/android/app/build/outputs/apk/debug/*.apk
             **/build/outputs/apk/debug/*.apk
 
- 
-        
-
-    
 
 
         
