@@ -1,3 +1,4 @@
+
 name: Build Android APK
 
 on:
@@ -34,7 +35,6 @@ jobs:
           echo "=== Repository Root Contents ==="
           ls -la
           
-          # If any zip exists, extract it into an 'extracted' folder
           mkdir -p extracted
           for z in *.zip; do
             if [ -f "$z" ]; then
@@ -58,8 +58,8 @@ jobs:
       - name: Install Dependencies
         run: |
           cd "${{ env.PROJECT_DIR }}"
-          echo "Installing dependencies in $(pwd)"
-          pnpm install
+          echo "Installing dependencies with no-frozen-lockfile..."
+          pnpm install --no-frozen-lockfile
 
       - name: Build Android APK
         run: |
