@@ -1,4 +1,3 @@
-
 name: Build Android APK
 
 on:
@@ -58,21 +57,26 @@ jobs:
       - name: Install Dependencies
         run: |
           cd "${{ env.PROJECT_DIR }}"
-          echo "Installing dependencies with no-frozen-lockfile..."
+          echo "Installing dependencies..."
           pnpm install --no-frozen-lockfile
 
-      - name: Build Android APK
+      - name: Generate Android Platform and Build APK
         run: |
           cd "${{ env.PROJECT_DIR }}"
-          if grep -q '@capacitor/core' package.json; then
-            pnpm cap sync android
+          
+          # Check if capacitor config exists and android folder is missing
+          if [ ! -d "android" ]; then
+            echo "Android folder missing. Attempting to add android platform..."
+            npx cap add android || true
+            pnpm cap sync android || true
           fi
+          
           if [ -d "android" ]; then
             cd android
             chmod +x gradlew
             ./gradlew assembleDebug
           else
-            echo "Error: Android folder not generated inside project!"
+            echo "Error: Could not generate Android folder. Please check project configuration."
             exit 1
           fi
 
