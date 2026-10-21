@@ -54,31 +54,41 @@ jobs:
           echo "SUCCESS: Found project directory at: $PROJECT_DIR"
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
 
-      - name: Install Dependencies
+      - name: Install Dependencies and Capacitor
         run: |
           cd "${{ env.PROJECT_DIR }}"
           echo "Installing dependencies..."
           pnpm install --no-frozen-lockfile
+          
+          # Force install capacitor tools globally/locally to avoid 'cap not found' error
+          pnpm add -D @capacitor/cli @capacitor/core @capacitor/android || true
 
       - name: Generate Android Platform and Build APK
         run: |
           cd "${{ env.PROJECT_DIR }}"
           
-          # Check if android folder is missing
-          if [ ! -d "android" ]; then
-            echo "Android folder missing. Adding capacitor android platform..."
-            pnpm add -D @capacitor/android || true
-            pnpm exec cap add android || true
-            pnpm exec cap sync android || true
+          # Remove old broken android folder if exists and recreate fresh
+          if [ -d "android" ]; then
+            echo "Removing existing android folder to regenerate fresh..."
+            rm -rf android
           fi
+          
+          echo "Adding capacitor android platform..."
+          npx @capacitor/cli add android || npx cap add android || true
+          npx @capacitor/cli sync android || npx cap sync android || true
           
           if [ -d "android" ]; then
             cd android
             chmod +x gradlew
             ./gradlew assembleDebug
           else
-            echo "Error: Could not generate Android folder. Please check project configuration."
-            exit 1
+            echo "Error: Android folder could not be generated. Trying direct gradle build..."
+            if [ -f "build.gradle" ] || [ -d "app" ]; then
+              chmod +x gradlew || true
+              ./gradlew assembleDebug
+            else
+              exit 1
+            fi
           fi
 
       - name: Upload APK Artifact
@@ -88,6 +98,7 @@ jobs:
           path: |
             **/android/app/build/outputs/apk/debug/*.apk
             **/build/outputs/apk/debug/*.apk
+
 
 
 
