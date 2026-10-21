@@ -1,3 +1,4 @@
+
 name: Build Android APK
 
 on:
@@ -12,10 +13,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js 22
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
+      - name: Force Install Node.js 22 via Shell
+        run: |
+          echo "Installing Node.js 22..."
+          sudo npm install -g n
+          sudo n 22
+          node -v
+          npm -v
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
@@ -57,10 +61,10 @@ jobs:
       - name: Install Dependencies and Capacitor
         run: |
           cd "${{ env.PROJECT_DIR }}"
-          echo "Installing dependencies with Node 22..."
+          echo "Installing dependencies..."
           pnpm install --no-frozen-lockfile
           
-          # Ensure capacitor tools are present
+          # Force add capacitor packages
           pnpm add -D @capacitor/cli @capacitor/core @capacitor/android || true
 
       - name: Generate Android Platform and Build APK
@@ -81,13 +85,8 @@ jobs:
             chmod +x gradlew
             ./gradlew assembleDebug
           else
-            echo "Error: Android folder could not be generated. Trying direct gradle build..."
-            if [ -f "build.gradle" ] || [ -d "app" ]; then
-              chmod +x gradlew || true
-              ./gradlew assembleDebug
-            else
-              exit 1
-            fi
+            echo "Error: Android folder could not be generated!"
+            exit 1
           fi
 
       - name: Upload APK Artifact
@@ -97,5 +96,3 @@ jobs:
           path: |
             **/android/app/build/outputs/apk/debug/*.apk
             **/build/outputs/apk/debug/*.apk
-
-        
