@@ -12,10 +12,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
+      - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
@@ -57,19 +57,18 @@ jobs:
       - name: Install Dependencies and Capacitor
         run: |
           cd "${{ env.PROJECT_DIR }}"
-          echo "Installing dependencies..."
+          echo "Installing dependencies with Node 22..."
           pnpm install --no-frozen-lockfile
           
-          # Force install capacitor tools globally/locally to avoid 'cap not found' error
+          # Ensure capacitor tools are present
           pnpm add -D @capacitor/cli @capacitor/core @capacitor/android || true
 
       - name: Generate Android Platform and Build APK
         run: |
           cd "${{ env.PROJECT_DIR }}"
           
-          # Remove old broken android folder if exists and recreate fresh
           if [ -d "android" ]; then
-            echo "Removing existing android folder to regenerate fresh..."
+            echo "Removing old android folder to regenerate fresh..."
             rm -rf android
           fi
           
@@ -98,8 +97,5 @@ jobs:
           path: |
             **/android/app/build/outputs/apk/debug/*.apk
             **/build/outputs/apk/debug/*.apk
-
-
-
 
         
