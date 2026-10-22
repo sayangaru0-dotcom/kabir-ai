@@ -1,3 +1,4 @@
+
 name: Build Android APK
 
 # Builds a standalone, installable Android APK of Kabir AI and publishes it as a downloadable artifact.
@@ -80,43 +81,85 @@ jobs:
           fi
           exit 0
 
-      # The project may sit at the repository root, inside a folder (for example a ZIP uploaded as "kabir-ai-master/"),
-      # or may still be inside a committed .zip file. Find it instead of assuming a path.
+      # Finds the Kabir project wherever it ended up: at the repository root, inside any number of wrapper folders, inside a committed
+      # ZIP, or inside a ZIP inside a ZIP. A folder counts as the project root only if it holds BOTH pnpm-workspace.yaml and
+      # artifacts/kabir-ai/package.json, so a leftover or partial copy cannot hide the real one. If nothing is found, the log AND the
+      # run summary list exactly what was found (so it can be read on a phone without opening the log).
       - name: Locate the project
         id: loc
         run: |
           set -euo pipefail
-          find_ws() {
-            find . -maxdepth 5 -type f -name pnpm-workspace.yaml -not -path '*/node_modules/*' -print \
-              | awk -F/ '{ print NF "\t" $0 }' | sort -n | head -n 1 | cut -f2- || true
+          SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+          find_root() {
+            find . -maxdepth 10 -type f -path '*/artifacts/kabir-ai/package.json' -not -path '*/node_modules/*' -print 2>/dev/null \
+              | while IFS= read -r p; do
+                  r="$(dirname "$(dirname "$(dirname "$p")")")"
+                  if [ -f "$r/pnpm-workspace.yaml" ]; then printf '%s\t%s\n' "$(printf '%s' "$r" | awk -F/ '{ print NF }')" "$r"; fi
+                done | sort -n | head -n 1 | cut -f2- || true
           }
-          WS="$(find_ws)"
-          if [ -z "$WS" ]; then
-            ZIP=""
-            while IFS= read -r z; do
-              # grep must read ALL of unzip's output: with `grep -q` + pipefail, an early exit can SIGPIPE unzip and flip the result at random.
-              if unzip -l "$z" 2>/dev/null | grep 'pnpm-workspace.yaml' > /dev/null; then ZIP="$z"; break; fi
-            done < <(find . -maxdepth 4 -type f -iname '*.zip' -not -path '*/node_modules/*' -print 2>/dev/null | sort)
-            if [ -n "$ZIP" ]; then
-              echo "::notice title=Project is inside a ZIP::Extracting $ZIP"
-              mkdir -p _extracted
-              unzip -q -o "$ZIP" -d _extracted
-              WS="$(find_ws)"
+
+          # unzip exits 1 for harmless warnings; only 2 and above are real failures, and then Python's zipfile is the fallback.
+          extract_zip() {
+            local z="$1" dest="$2" rc
+            mkdir -p "$dest"
+            set +e; unzip -q -o "$z" -d "$dest" > /dev/null 2>&1; rc=$?; set -e
+            if [ "$rc" -gt 1 ]; then
+              echo "unzip exited with $rc for $z; retrying with Python's zipfile"
+              python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$z" "$dest"
             fi
-          fi
-          if [ -z "$WS" ]; then
-            echo "::error title=Project not found::pnpm-workspace.yaml was not found (searched 5 folder levels and any .zip files). Upload the project so that pnpm-workspace.yaml and the artifacts/ folder are inside the repository."
-            echo "Repository top level:"; ls -la
+          }
+
+          ROOT="$(find_root)"
+          DONE="$(mktemp)"; IDX=0; PASS=0
+          # Up to 3 rounds: the first opens ZIPs found in the repository, the next ones open ZIPs found inside those (ZIP inside ZIP).
+          while [ -z "$ROOT" ] && [ "$PASS" -lt 3 ]; do
+            PASS=$((PASS + 1)); OPENED=0
+            while IFS= read -r z; do
+              if grep -Fxq -- "$z" "$DONE" 2>/dev/null; then continue; fi
+              printf '%s\n' "$z" >> "$DONE"
+              names="$(unzip -Z1 "$z" 2>/dev/null || true)"
+              case "$names" in *pnpm-workspace.yaml*|*kabir-ai*|*.zip*|*.ZIP*) ;; *) continue ;; esac
+              IDX=$((IDX + 1))
+              echo "::notice title=Project is inside a ZIP::Extracting $z"
+              extract_zip "$z" "_extracted/$IDX"
+              OPENED=1
+            done < <(find . -maxdepth 8 -type f -iname '*.zip' -not -path '*/node_modules/*' -print 2>/dev/null | sort)
+            ROOT="$(find_root)"
+            if [ "$OPENED" = 0 ]; then break; fi
+          done
+
+          if [ -z "$ROOT" ]; then
+            WSS="$(find . -maxdepth 10 -type f -name pnpm-workspace.yaml -not -path '*/node_modules/*' -print 2>/dev/null | head -n 8 || true)"
+            ARTS="$(find . -maxdepth 10 -type f -path '*/artifacts/*/package.json' -not -path '*/node_modules/*' -print 2>/dev/null | head -n 12 || true)"
+            ZIPS="$(find . -maxdepth 8 -type f -iname '*.zip' -not -path '*/node_modules/*' -not -path './_extracted/*' -print 2>/dev/null | sort | head -n 6 || true)"
+            if [ -n "$WSS" ]; then
+              TITLE="App not found"
+              WHY="Found a pnpm-workspace.yaml but no artifacts/kabir-ai/package.json beside it: the upload is incomplete or is another project. The website uploader accepts only 100 files per upload; commit files.zip instead, or use git / GitHub Desktop."
+            else
+              TITLE="Project not found"
+              WHY="No pnpm-workspace.yaml and no usable ZIP was found in the repository. Upload the project files (or the original files.zip) so that pnpm-workspace.yaml and the artifacts/ folder exist."
+            fi
+            echo "::error title=$TITLE::$WHY"
+            {
+              echo "## $TITLE"; echo ""; echo "$WHY"; echo ""
+              echo "**pnpm-workspace.yaml found at:**"; echo '```'; echo "${WSS:-(none)}"; echo '```'
+              echo "**artifacts/*/package.json found at:**"; echo '```'; echo "${ARTS:-(none)}"; echo '```'
+              echo "**ZIP files in the repository, with their first entries:**"; echo '```'
+              if [ -z "$ZIPS" ]; then echo "(no .zip files)"; fi
+              while IFS= read -r z; do
+                [ -n "$z" ] || continue
+                echo "$z"
+                { unzip -Z1 "$z" 2>/dev/null | head -n 8 | sed 's/^/    /'; } || true
+              done <<< "$ZIPS"
+              echo '```'
+              echo "**Repository top level:**"; echo '```'; ls -A | head -n 40; echo '```'
+            } | tee -a "$SUMMARY"
             exit 1
           fi
-          ROOT="$(cd "$(dirname "$WS")" && pwd)"
+
+          ROOT="$(cd "$ROOT" && pwd)"
           APP="$ROOT/artifacts/kabir-ai"
-          if [ ! -f "$APP/package.json" ]; then
-            echo "::error title=App not found::Expected $APP/package.json but it does not exist."
-            echo "Contents of $ROOT:"; ls -la "$ROOT"
-            echo "Contents of $ROOT/artifacts:"; ls -la "$ROOT/artifacts" || true
-            exit 1
-          fi
           if [ ! -f "$ROOT/pnpm-lock.yaml" ]; then
             echo "::warning title=No lockfile::pnpm-lock.yaml was not found in $ROOT. Dependencies will be resolved fresh (slower and less reproducible)."
           fi
